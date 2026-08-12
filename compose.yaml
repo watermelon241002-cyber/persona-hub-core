@@ -1,0 +1,11 @@
+services:
+  persona-hub:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:18080:18080"
+    volumes:
+      - ./data:/app/data
+      - ./prompts:/app/prompts:ro

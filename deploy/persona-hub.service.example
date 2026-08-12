@@ -1,0 +1,18 @@
+[Unit]
+Description=Persona Hub Core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=persona
+Group=persona
+WorkingDirectory=/opt/persona-hub-core
+EnvironmentFile=/opt/persona-hub-core/.env
+ExecStart=/opt/persona-hub-core/.venv/bin/persona-hub
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

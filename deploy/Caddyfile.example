@@ -1,0 +1,18 @@
+persona.example.com {
+    encode zstd gzip
+
+    @websocket {
+        path /worker/ws
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+
+    reverse_proxy @websocket 127.0.0.1:18080
+    reverse_proxy 127.0.0.1:18080
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}

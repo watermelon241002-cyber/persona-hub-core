@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "persona-hub-core"
+version = "0.1.0"
+description = "A reference kernel for one persistent persona across models, devices, and agent workers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "Persona Hub contributors" }]
+keywords = ["agents", "memory", "persona", "fastapi", "mcp", "multi-agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: FastAPI",
+  "License :: OSI Approved :: GNU Affero General Public License v3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "websockets>=14,<17",
+]
+
+[project.urls]
+Homepage = "https://github.com/watermelon241002-cyber/persona-hub-core"
+Documentation = "https://github.com/watermelon241002-cyber/persona-hub-core/tree/main/docs"
+Issues = "https://github.com/watermelon241002-cyber/persona-hub-core/issues"
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8,<10",
+]
+
+[project.scripts]
+persona-hub = "persona_hub.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
