@@ -4,6 +4,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # The server must listen on the container interface so the published
+      # port can reach it; the host side of the mapping stays on loopback.
+      PERSONA_HUB_HOST: 0.0.0.0
+      PERSONA_HUB_ALLOW_PUBLIC_BIND: "1"
     ports:
       - "127.0.0.1:18080:18080"
     volumes:

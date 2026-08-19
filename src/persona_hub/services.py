@@ -144,9 +144,17 @@ class RoomService:
                 )
                 self.database.set_delivery_state(delivery["id"], "claimed")
                 provider = self.providers.get(participant["provider_id"])
+                # The role prompt must live in the system prompt: metadata is
+                # advisory and real provider adapters ignore it.
+                role_prompt = (participant["role_prompt"] or "").strip()
+                system_prompt = self.persona_text
+                if role_prompt:
+                    system_prompt = (
+                        f"{self.persona_text}\n\n[Room role]\n{role_prompt}"
+                    )
                 result = await provider.generate(
                     GenerationRequest(
-                        system_prompt=self.persona_text,
+                        system_prompt=system_prompt,
                         messages=messages,
                         metadata={
                             "room_id": room_id,

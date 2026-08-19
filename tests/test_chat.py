@@ -34,6 +34,25 @@ def test_chat_request_is_idempotent(client, echo_provider):
     assert [message["role"] for message in messages] == ["user", "assistant"]
 
 
+def test_same_request_id_with_different_payload_conflicts(client, echo_provider):
+    conversation_id = create_conversation(client)
+    payload = {
+        "conversation_id": conversation_id,
+        "request_id": "conflict-request-0001",
+        "content": "Original payload.",
+        "provider_id": "echo",
+    }
+
+    first = client.post("/api/chat", json=payload)
+    changed = client.post(
+        "/api/chat", json={**payload, "content": "Tampered payload."}
+    )
+
+    assert first.status_code == 200
+    assert changed.status_code == 409
+    assert echo_provider.calls == 1
+
+
 class FailingProvider:
     provider_id = "failing"
 

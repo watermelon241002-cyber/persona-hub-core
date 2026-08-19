@@ -4,6 +4,8 @@
 
 - [x] SQLite conversations and messages
 - [x] idempotent chat requests
+- [x] payload-verified idempotency keys
+- [x] optional bearer-token REST auth (required in production)
 - [x] provider registry and local echo provider
 - [x] OpenAI-compatible adapter
 - [x] deterministic demo memory gateway

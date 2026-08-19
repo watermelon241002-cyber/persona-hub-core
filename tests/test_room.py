@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+from persona_hub.providers import GenerationRequest, GenerationResult
+
+
+class RecordingProvider:
+    provider_id = "recording"
+
+    def __init__(self) -> None:
+        self.requests: list[GenerationRequest] = []
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests.append(request)
+        return GenerationResult(text="ok", model_id="recording-v1")
+
 
 def create_room(client) -> str:
     response = client.post(
@@ -72,3 +85,55 @@ def test_room_rejects_duplicate_positions(client):
         },
     )
     assert response.status_code == 400
+
+
+def test_room_turn_same_request_id_different_content_conflicts(client):
+    room_id = create_room(client)
+    first = client.post(
+        f"/api/rooms/{room_id}/turns",
+        json={"request_id": "room-conflict-0001", "content": "Original prompt."},
+    )
+    changed = client.post(
+        f"/api/rooms/{room_id}/turns",
+        json={"request_id": "room-conflict-0001", "content": "Different prompt."},
+    )
+
+    assert first.status_code == 200
+    assert changed.status_code == 409
+
+
+def test_role_prompt_reaches_provider_system_prompt(app_bundle):
+    app, _, providers = app_bundle
+    recording = RecordingProvider()
+    providers.register(recording)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/rooms",
+            json={
+                "title": "Prompt room",
+                "participants": [
+                    {
+                        "agent_id": "claude",
+                        "display_name": "Claude",
+                        "provider_id": "recording",
+                        "position": 1,
+                        "role_prompt": "Propose the first implementation.",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+        room_id = response.json()["id"]
+        turn = client.post(
+            f"/api/rooms/{room_id}/turns",
+            json={"request_id": "room-prompt-0001", "content": "Start."},
+        )
+
+    assert turn.status_code == 200
+    assert len(recording.requests) == 1
+    system_prompt = recording.requests[0].system_prompt
+    assert "Propose the first implementation." in system_prompt
+    assert system_prompt.startswith("You are the same careful persona")

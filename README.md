@@ -57,7 +57,9 @@ Most multi-model systems copy a large prompt into every client. That works until
 ## Included in this alpha
 
 - SQLite conversation and message persistence
-- Idempotent chat requests
+- Idempotent chat requests with payload verification (same `request_id` +
+  different payload is rejected with 409 instead of replaying stale output)
+- Optional bearer-token REST authentication, enforced in production
 - Stable/dynamic context package builder
 - Pluggable provider registry
 - Built-in deterministic echo provider for local tests
@@ -131,6 +133,20 @@ Open:
 
 The default `echo` provider requires no network or API key.
 
+## Authentication
+
+The REST API supports a static bearer token:
+
+```dotenv
+PERSONA_HUB_API_TOKEN=choose-a-long-random-token
+```
+
+When the token is set, every `/api/*` request must send
+`Authorization: Bearer <token>`; health probes stay open. When it is empty,
+auth is disabled — acceptable only for local development. With
+`PERSONA_HUB_ENV=production` the server refuses to start without a token, and
+the worker WebSocket keeps its own separate `PERSONA_HUB_WORKER_TOKEN`.
+
 ## Minimal API walkthrough
 
 Create a conversation:
@@ -154,7 +170,7 @@ curl -X POST http://127.0.0.1:18080/api/chat \
   }'
 ```
 
-Sending the exact same `request_id` again returns the persisted result without invoking the provider again.
+Sending the exact same `request_id` again returns the persisted result without invoking the provider again. Reusing a `request_id` with a different conversation, provider, or content returns `409 Conflict` instead of silently replaying the old answer.
 
 Store and recall a demo memory:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -10,8 +11,17 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 
+class RequestPayloadConflictError(ValueError):
+    """The request_id was already used with a different payload."""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def payload_fingerprint(*parts: str) -> str:
+    joined = "\x1f".join(parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 SCHEMA = """
@@ -48,6 +58,7 @@ CREATE TABLE IF NOT EXISTS requests (
     assistant_message_id TEXT,
     provider_id TEXT NOT NULL,
     recalled_memory_ids_json TEXT NOT NULL DEFAULT '[]',
+    payload_hash TEXT,
     error_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -96,6 +107,7 @@ CREATE TABLE IF NOT EXISTS agent_room_turns (
     request_id TEXT NOT NULL UNIQUE,
     turn_no INTEGER NOT NULL,
     state TEXT NOT NULL,
+    payload_hash TEXT,
     started_at TEXT NOT NULL,
     completed_at TEXT,
     UNIQUE (room_id, turn_no),
@@ -160,6 +172,14 @@ class Database:
     def initialize(self) -> None:
         with self._lock:
             self._connection.executescript(SCHEMA)
+            # Databases created before payload verification lack this column.
+            for table in ("requests", "agent_room_turns"):
+                try:
+                    self._connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN payload_hash TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
     def close(self) -> None:
         with self._lock:
@@ -227,11 +247,18 @@ class Database:
         content: str,
     ) -> tuple[dict[str, Any], bool]:
         now = utc_now()
+        fingerprint = payload_fingerprint(conversation_id, provider_id, content)
         with self.transaction() as connection:
             existing = connection.execute(
                 "SELECT * FROM requests WHERE request_id = ?", (request_id,)
             ).fetchone()
             if existing is not None:
+                stored = existing["payload_hash"]
+                if stored and stored != fingerprint:
+                    raise RequestPayloadConflictError(
+                        "request_id was already used with a different payload;"
+                        " use a new request_id"
+                    )
                 return dict(existing), True
 
             conversation = connection.execute(
@@ -255,10 +282,18 @@ class Database:
                 INSERT INTO requests
                 (request_id, conversation_id, state, user_message_id,
                  assistant_message_id, provider_id, recalled_memory_ids_json,
-                 error_json, created_at, updated_at)
-                VALUES (?, ?, 'pending', ?, NULL, ?, '[]', NULL, ?, ?)
+                 payload_hash, error_json, created_at, updated_at)
+                VALUES (?, ?, 'pending', ?, NULL, ?, '[]', ?, NULL, ?, ?)
                 """,
-                (request_id, conversation_id, user_message_id, provider_id, now, now),
+                (
+                    request_id,
+                    conversation_id,
+                    user_message_id,
+                    provider_id,
+                    fingerprint,
+                    now,
+                    now,
+                ),
             )
             connection.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -451,11 +486,18 @@ class Database:
         self, *, room_id: str, request_id: str, content: str
     ) -> tuple[dict[str, Any], bool]:
         now = utc_now()
+        fingerprint = payload_fingerprint(room_id, content)
         with self.transaction() as connection:
             existing = connection.execute(
                 "SELECT * FROM agent_room_turns WHERE request_id = ?", (request_id,)
             ).fetchone()
             if existing is not None:
+                stored = existing["payload_hash"]
+                if stored and stored != fingerprint:
+                    raise RequestPayloadConflictError(
+                        "request_id was already used with a different payload;"
+                        " use a new request_id"
+                    )
                 return dict(existing), True
 
             room = connection.execute(
@@ -478,10 +520,11 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO agent_room_turns
-                (id, room_id, request_id, turn_no, state, started_at, completed_at)
-                VALUES (?, ?, ?, ?, 'running', ?, NULL)
+                (id, room_id, request_id, turn_no, state, payload_hash,
+                 started_at, completed_at)
+                VALUES (?, ?, ?, ?, 'running', ?, ?, NULL)
                 """,
-                (turn_id, room_id, request_id, turn_no, now),
+                (turn_id, room_id, request_id, turn_no, fingerprint, now),
             )
             connection.execute(
                 """

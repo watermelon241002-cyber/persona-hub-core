@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import secrets
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
+from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .context import ContextBuilder
-from .db import Database
+from .db import Database, RequestPayloadConflictError
 from .memory import MemoryGateway
 from .models import (
     ChatRequest,
@@ -99,6 +101,21 @@ def create_app(
     app.state.memory_gateway = memory_gateway
     app.state.worker_registry = worker_registry
 
+    if settings.api_token:
+        expected_auth = f"Bearer {settings.api_token}".encode()
+
+        @app.middleware("http")
+        async def require_api_token(request: Request, call_next):
+            if request.url.path.startswith("/api/"):
+                supplied = request.headers.get("authorization", "").encode()
+                if not secrets.compare_digest(supplied, expected_auth):
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Missing or invalid API token"},
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            return await call_next(request)
+
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
         return {"status": "ok"}
@@ -141,6 +158,8 @@ def create_app(
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RequestPayloadConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RequestInProgressError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except PreviousRequestFailedError as exc:
@@ -203,6 +222,8 @@ def create_app(
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RequestPayloadConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
