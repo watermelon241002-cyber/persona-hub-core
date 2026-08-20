@@ -50,6 +50,12 @@ class MemoryCreate(BaseModel):
     kind: str = "episodic"
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     occurred_at: str | None = None
+    # Pinned memories surface on every turn, whatever the topic is.
+    pinned: bool = False
+    valence: float | None = Field(default=None, ge=-1.0, le=1.0)
+    arousal: float | None = Field(default=None, ge=0.0, le=1.0)
+    quotes: list[str] = Field(default_factory=list)
+    scene: str = Field(default="", max_length=2_000)
 
 
 class MemoryView(BaseModel):
@@ -60,6 +66,14 @@ class MemoryView(BaseModel):
     score: float | None = None
     occurred_at: str | None = None
     created_at: str
+    pinned: bool = False
+    valence: float | None = None
+    arousal: float | None = None
+    quotes: list[str] = Field(default_factory=list)
+    scene: str = ""
+    # Per-signal breakdown of `score`, so a surprising recall can be explained
+    # instead of guessed at.
+    signals: dict[str, float] = Field(default_factory=dict)
 
 
 class RoomParticipantCreate(BaseModel):

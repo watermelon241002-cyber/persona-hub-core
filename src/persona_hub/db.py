@@ -74,6 +74,11 @@ CREATE TABLE IF NOT EXISTS memories (
     importance REAL NOT NULL DEFAULT 0.5,
     embedding_json TEXT NOT NULL,
     occurred_at TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    valence REAL,
+    arousal REAL,
+    quotes_json TEXT NOT NULL DEFAULT '[]',
+    scene TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -177,6 +182,23 @@ class Database:
                 try:
                     self._connection.execute(
                         f"ALTER TABLE {table} ADD COLUMN payload_hash TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            # Databases created before affect-aware recall lack these columns.
+            # `pinned` carries memories that must surface regardless of topic;
+            # valence/arousal give recall an emotional axis that an embedding
+            # cannot provide on its own.
+            for column, definition in (
+                ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+                ("valence", "REAL"),
+                ("arousal", "REAL"),
+                ("quotes_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("scene", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    self._connection.execute(
+                        f"ALTER TABLE memories ADD COLUMN {column} {definition}"
                     )
                 except sqlite3.OperationalError:
                     pass
@@ -394,6 +416,11 @@ class Database:
         importance: float,
         embedding: list[float],
         occurred_at: str | None,
+        pinned: bool = False,
+        valence: float | None = None,
+        arousal: float | None = None,
+        quotes: list[str] | None = None,
+        scene: str = "",
     ) -> dict[str, Any]:
         memory_id = str(uuid4())
         now = utc_now()
@@ -402,8 +429,9 @@ class Database:
                 """
                 INSERT INTO memories
                 (id, kind, content, importance, embedding_json, occurred_at,
+                 pinned, valence, arousal, quotes_json, scene,
                  created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
@@ -412,6 +440,11 @@ class Database:
                     importance,
                     json.dumps(embedding),
                     occurred_at,
+                    1 if pinned else 0,
+                    valence,
+                    arousal,
+                    json.dumps(quotes or []),
+                    scene,
                     now,
                     now,
                 ),

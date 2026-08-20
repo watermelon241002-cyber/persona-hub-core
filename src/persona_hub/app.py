@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 import secrets
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.responses import JSONResponse
@@ -33,6 +34,24 @@ from .services import (
     RoomService,
 )
 from .workers import WorkerRegistry
+
+
+def _memory_row_to_view(row: dict[str, Any]) -> dict[str, Any]:
+    """Shape a stored memory row for the API.
+
+    The embedding never leaves the process, and `quotes` is exposed as a list
+    rather than the raw JSON column.
+    """
+
+    data = dict(row)
+    data.pop("embedding_json", None)
+    quotes_raw = data.pop("quotes_json", "[]")
+    try:
+        data["quotes"] = json.loads(quotes_raw) if isinstance(quotes_raw, str) else list(quotes_raw or [])
+    except json.JSONDecodeError:
+        data["quotes"] = []
+    data["pinned"] = bool(data.get("pinned", 0))
+    return data
 
 
 def create_app(
@@ -174,14 +193,20 @@ def create_app(
             kind=payload.kind,
             importance=payload.importance,
             occurred_at=payload.occurred_at,
+            pinned=payload.pinned,
+            valence=payload.valence,
+            arousal=payload.arousal,
+            quotes=payload.quotes,
+            scene=payload.scene,
         )
-        row.pop("embedding_json", None)
-        return row
+        return _memory_row_to_view(row)
 
     @app.get("/api/memories/recall", response_model=list[MemoryView])
     def recall_memories(
         q: str = Query(min_length=1, max_length=20_000),
         limit: int = Query(default=5, ge=1, le=20),
+        valence: float | None = Query(default=None, ge=-1.0, le=1.0),
+        arousal: float | None = Query(default=None, ge=0.0, le=1.0),
     ) -> list[dict]:
         return [
             {
@@ -192,8 +217,14 @@ def create_app(
                 "score": item.score,
                 "occurred_at": item.occurred_at,
                 "created_at": item.created_at,
+                "pinned": item.pinned,
+                "valence": item.valence,
+                "arousal": item.arousal,
+                "quotes": item.quotes,
+                "scene": item.scene,
+                "signals": item.signals,
             }
-            for item in memory_gateway.recall(q, limit=limit)
+            for item in memory_gateway.recall(q, limit=limit, mood=(valence, arousal))
         ]
 
     @app.post("/api/rooms")
