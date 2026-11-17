@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
     model_id TEXT,
     request_id TEXT,
     status TEXT NOT NULL DEFAULT 'completed',
+    do_not_surface INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
 );
@@ -152,8 +153,84 @@ CREATE TABLE IF NOT EXISTS agent_room_deliveries (
     FOREIGN KEY (turn_id) REFERENCES agent_room_turns(id)
 );
 
+-- Reflection output that is not yet trusted enough to become a memory.
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    score REAL NOT NULL,
+    importance REAL NOT NULL DEFAULT 0.5,
+    source TEXT NOT NULL,
+    conversation_id TEXT,
+    source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'accepted', 'rejected')),
+    memory_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- One short scene per reflected turn: what was said, how it felt.
+CREATE TABLE IF NOT EXISTS memory_segments (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL,
+    quotes_json TEXT NOT NULL DEFAULT '[]',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    valence REAL,
+    arousal REAL,
+    start_message_id TEXT,
+    end_message_id TEXT,
+    do_not_surface INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- Layered summaries: daily from messages, weekly from daily, monthly from weekly.
+CREATE TABLE IF NOT EXISTS memory_summaries (
+    id TEXT PRIMARY KEY,
+    summary_type TEXT NOT NULL CHECK (summary_type IN ('daily', 'weekly', 'monthly')),
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    content TEXT NOT NULL,
+    quotes_json TEXT NOT NULL DEFAULT '[]',
+    scene TEXT NOT NULL DEFAULT '',
+    valence REAL,
+    arousal REAL,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    source_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    UNIQUE (summary_type, period_start, period_end)
+);
+
+-- What the persona did on its own while nobody was talking to it.
+CREATE TABLE IF NOT EXISTS desire_activity (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    action TEXT NOT NULL,
+    drive TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
 ON messages(conversation_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_messages_created
+ON messages(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_status
+ON memory_candidates(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_memory_segments_created
+ON memory_segments(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_memory_summaries_period
+ON memory_summaries(summary_type, period_start);
+
+CREATE INDEX IF NOT EXISTS idx_desire_activity_created
+ON desire_activity(created_at);
 
 CREATE INDEX IF NOT EXISTS idx_memories_created
 ON memories(created_at);
@@ -202,6 +279,15 @@ class Database:
                     )
                 except sqlite3.OperationalError:
                     pass
+            # Databases created before reflection lack the "do not surface"
+            # flag. It hides a message from every later prompt (summaries,
+            # desire context) without deleting the evidence.
+            try:
+                self._connection.execute(
+                    "ALTER TABLE messages ADD COLUMN do_not_surface INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
 
     def close(self) -> None:
         with self._lock:
@@ -459,6 +545,310 @@ class Database:
 
     def list_memories(self) -> list[dict[str, Any]]:
         return self.fetchall("SELECT * FROM memories ORDER BY created_at DESC")
+
+    # -- messages outside a single chat request -------------------------------
+
+    def append_message(
+        self,
+        *,
+        conversation_id: str,
+        role: str,
+        content: str,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Store a message that did not come through /api/chat (imports, tests)."""
+
+        message_id = str(uuid4())
+        with self.transaction() as connection:
+            if connection.execute(
+                "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone() is None:
+                raise KeyError(f"Conversation not found: {conversation_id}")
+            connection.execute(
+                """
+                INSERT INTO messages (id, conversation_id, role, content, status, created_at)
+                VALUES (?, ?, ?, ?, 'completed', ?)
+                """,
+                (message_id, conversation_id, role, content, created_at or utc_now()),
+            )
+        return self.get_message(message_id)
+
+    def mark_messages_do_not_surface(self, message_ids: list[str]) -> None:
+        ids = [item for item in message_ids if item]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        with self.transaction() as connection:
+            connection.execute(
+                f"UPDATE messages SET do_not_surface = 1 WHERE id IN ({placeholders})",
+                tuple(ids),
+            )
+
+    def recent_visible_messages(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Latest user/assistant messages across all conversations, oldest first.
+
+        Privacy filtering happens before the limit, so hidden rows never take a
+        slot from visible ones.
+        """
+
+        rows = self.fetchall(
+            """
+            SELECT messages.*, rowid AS internal_rowid FROM messages
+            WHERE role IN ('user', 'assistant') AND do_not_surface = 0
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (max(0, limit),),
+        )
+        return list(reversed(rows))
+
+    def messages_between(
+        self, start_at: str, end_at: str, *, limit: int = 2000
+    ) -> list[dict[str, Any]]:
+        return self.fetchall(
+            """
+            SELECT * FROM messages
+            WHERE role IN ('user', 'assistant') AND do_not_surface = 0
+              AND created_at >= ? AND created_at < ?
+            ORDER BY created_at ASC, rowid ASC
+            LIMIT ?
+            """,
+            (start_at, end_at, max(1, limit)),
+        )
+
+    # -- memory candidates ------------------------------------------------------
+
+    def add_memory_candidate(
+        self,
+        *,
+        kind: str,
+        content: str,
+        tags: list[str],
+        score: float,
+        importance: float,
+        source: str,
+        conversation_id: str | None,
+        source_message_ids: list[str],
+    ) -> dict[str, Any]:
+        candidate_id = str(uuid4())
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_candidates
+                (id, kind, content, tags_json, score, importance, source,
+                 conversation_id, source_message_ids_json, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    candidate_id,
+                    kind,
+                    content,
+                    json.dumps(tags, ensure_ascii=False),
+                    score,
+                    importance,
+                    source,
+                    conversation_id,
+                    json.dumps(source_message_ids),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_memory_candidate(candidate_id)
+
+    def get_memory_candidate(self, candidate_id: str) -> dict[str, Any]:
+        row = self.fetchone("SELECT * FROM memory_candidates WHERE id = ?", (candidate_id,))
+        if row is None:
+            raise KeyError(f"Memory candidate not found: {candidate_id}")
+        return row
+
+    def list_memory_candidates(self, status: str = "pending", limit: int = 50) -> list[dict[str, Any]]:
+        return self.fetchall(
+            "SELECT * FROM memory_candidates WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+            (status, max(1, limit)),
+        )
+
+    def resolve_memory_candidate(
+        self, candidate_id: str, *, status: str, memory_id: str | None = None
+    ) -> dict[str, Any]:
+        with self.transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE memory_candidates SET status = ?, memory_id = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (status, memory_id, utc_now(), candidate_id),
+            ).rowcount
+        if not updated:
+            raise ValueError(f"Memory candidate is not pending: {candidate_id}")
+        return self.get_memory_candidate(candidate_id)
+
+    def recent_texts_by_kind(self, kind: str, *, days: int = 30, limit: int = 50) -> list[str]:
+        """Recent memories and pending candidates of one kind, for duplicate checks."""
+
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        memories = self.fetchall(
+            "SELECT content FROM memories WHERE kind = ? AND created_at >= ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (kind, since, limit),
+        )
+        pending = self.fetchall(
+            "SELECT content FROM memory_candidates WHERE kind = ? AND status = 'pending'"
+            " ORDER BY created_at DESC LIMIT ?",
+            (kind, limit),
+        )
+        return [str(row["content"]) for row in [*memories, *pending] if row["content"]]
+
+    # -- segments and summaries -------------------------------------------------
+
+    def add_memory_segment(
+        self,
+        *,
+        conversation_id: str,
+        title: str,
+        summary: str,
+        quotes: list[str],
+        tags: list[str],
+        valence: float | None,
+        arousal: float | None,
+        start_message_id: str | None,
+        end_message_id: str | None,
+        do_not_surface: bool,
+    ) -> dict[str, Any]:
+        segment_id = str(uuid4())
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_segments
+                (id, conversation_id, title, summary, quotes_json, tags_json, valence,
+                 arousal, start_message_id, end_message_id, do_not_surface, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    segment_id,
+                    conversation_id,
+                    title,
+                    summary,
+                    json.dumps(quotes, ensure_ascii=False),
+                    json.dumps(tags, ensure_ascii=False),
+                    valence,
+                    arousal,
+                    start_message_id,
+                    end_message_id,
+                    1 if do_not_surface else 0,
+                    utc_now(),
+                ),
+            )
+        return self.fetchone("SELECT * FROM memory_segments WHERE id = ?", (segment_id,)) or {}
+
+    def list_memory_segments(self, limit: int = 20, *, include_hidden: bool = False) -> list[dict[str, Any]]:
+        hidden_clause = "" if include_hidden else "WHERE do_not_surface = 0"
+        return self.fetchall(
+            f"SELECT * FROM memory_segments {hidden_clause} ORDER BY created_at DESC LIMIT ?",
+            (max(1, limit),),
+        )
+
+    def add_memory_summary(
+        self,
+        *,
+        summary_type: str,
+        period_start: str,
+        period_end: str,
+        content: str,
+        quotes: list[str],
+        scene: str,
+        valence: float | None,
+        arousal: float | None,
+        tags: list[str],
+        source_ids: list[str],
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        summary_id = str(uuid4())
+        with self.transaction() as connection:
+            if replace:
+                connection.execute(
+                    "DELETE FROM memory_summaries"
+                    " WHERE summary_type = ? AND period_start = ? AND period_end = ?",
+                    (summary_type, period_start, period_end),
+                )
+            connection.execute(
+                """
+                INSERT INTO memory_summaries
+                (id, summary_type, period_start, period_end, content, quotes_json, scene,
+                 valence, arousal, tags_json, source_ids_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    summary_id,
+                    summary_type,
+                    period_start,
+                    period_end,
+                    content,
+                    json.dumps(quotes, ensure_ascii=False),
+                    scene,
+                    valence,
+                    arousal,
+                    json.dumps(tags, ensure_ascii=False),
+                    json.dumps(source_ids),
+                    utc_now(),
+                ),
+            )
+        return self.fetchone("SELECT * FROM memory_summaries WHERE id = ?", (summary_id,)) or {}
+
+    def get_memory_summary_for_period(
+        self, summary_type: str, period_start: str, period_end: str
+    ) -> dict[str, Any] | None:
+        return self.fetchone(
+            "SELECT * FROM memory_summaries"
+            " WHERE summary_type = ? AND period_start = ? AND period_end = ?",
+            (summary_type, period_start, period_end),
+        )
+
+    def list_memory_summaries(
+        self,
+        summary_type: str | None = None,
+        *,
+        start_at: str | None = None,
+        end_at: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Newest first. With a window, only summaries fully inside it."""
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if summary_type:
+            clauses.append("summary_type = ?")
+            params.append(summary_type)
+        if start_at:
+            clauses.append("period_start >= ?")
+            params.append(start_at)
+        if end_at:
+            clauses.append("period_end <= ?")
+            params.append(end_at)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, limit))
+        return self.fetchall(
+            f"SELECT * FROM memory_summaries {where} ORDER BY period_start DESC LIMIT ?",
+            tuple(params),
+        )
+
+    # -- desire activity ----------------------------------------------------------
+
+    def add_desire_activity(self, *, kind: str, action: str, drive: str, content: str) -> dict[str, Any]:
+        activity_id = str(uuid4())
+        with self.transaction() as connection:
+            connection.execute(
+                "INSERT INTO desire_activity (id, kind, action, drive, content, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (activity_id, kind, action, drive, content, utc_now()),
+            )
+        return self.fetchone("SELECT * FROM desire_activity WHERE id = ?", (activity_id,)) or {}
+
+    def list_desire_activity(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self.fetchall(
+            "SELECT * FROM desire_activity ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (max(1, limit),),
+        )
 
     def create_room(self, title: str, participants: list[dict[str, Any]]) -> dict[str, Any]:
         room_id = str(uuid4())

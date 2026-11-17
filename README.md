@@ -65,6 +65,13 @@ Most multi-model systems copy a large prompt into every client. That works until
 - Built-in deterministic echo provider for local tests
 - Optional OpenAI-compatible provider adapter
 - Natural-recall memory gateway with a deterministic local demo embedder
+- Background turn reflection: score-anchored memory candidates, a review
+  queue, per-turn scenes with verbatim quotes, and "don't keep this" handling
+- Layered daily / weekly / monthly summaries with quotes, scene and emotional
+  coordinates, filled by a scheduler in the people's own time zone
+- Desire kernel and heartbeat host: eight drives, thought pool, coupling,
+  momentum, two-valve longing drift, quiet hours, output guards, all gated off
+  by default
 - Outbound worker WebSocket registration and heartbeat protocol
 - Sequential agent room: human -> first collaborator -> second collaborator -> human
 - Room delivery IDs and duplicate-turn protection
@@ -81,7 +88,7 @@ Most multi-model systems copy a large prompt into every client. That works until
 - Provider-specific bypasses or undocumented authentication flows
 - A claim that every roadmap module is production-ready
 
-Voice, desire/heartbeat, Ombre Brain, MCP management, and the full mobile frontend are documented integration surfaces and roadmap modules, not silently mocked features.
+Voice, Ombre Brain, MCP management, tool-using outward actions for the desire system, and the full mobile frontend are documented integration surfaces and roadmap modules, not silently mocked features.
 
 ## Architecture
 
@@ -252,6 +259,10 @@ The test suite covers:
 
 - chat idempotency
 - natural memory recall
+- reflection policy, duplicate and "don't keep this" handling
+- local-time summary periods, idempotent scheduling, layer order
+- desire red lines: owner channel, two-valve drift, bounded momentum,
+  reachable rest and actions, output guards, failure back-off
 - provider failure persistence
 - fixed room order
 - duplicate room-turn protection
@@ -260,6 +271,8 @@ The test suite covers:
 ## Documentation
 
 - [Full architecture and build guide](docs/architecture.md)
+- [Memory write pipeline: reflection and layered summaries](docs/memory-pipeline.md)
+- [Desire system](docs/desire-system.md)
 - [Three-agent room design](docs/three-agent-room.md)
 - [Worker protocol](docs/worker-protocol.md)
 - [Security policy](SECURITY.md)

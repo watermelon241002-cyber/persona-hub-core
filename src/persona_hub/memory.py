@@ -51,11 +51,18 @@ KIND_PRIORS: Mapping[str, float] = {
     "safety": 0.95,
     "relationship": 0.80,
     "preference": 0.75,
+    "habit": 0.75,
     "fact": 0.70,
+    "quote": 0.70,
     "plan": 0.65,
     "project": 0.65,
+    "work": 0.65,
+    "emotion": 0.60,
     "episodic": 0.55,
     "note": 0.50,
+    # Work logs pile up fast and drown everything else if they rank like
+    # memories of the relationship itself.
+    "worklog": 0.40,
 }
 DEFAULT_KIND_PRIOR = 0.55
 

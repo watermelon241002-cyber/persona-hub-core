@@ -25,6 +25,20 @@ class Settings:
     openai_base_url: str = ""
     openai_api_key: str = ""
     openai_model: str = ""
+    # The people's own time zone: summary days, quiet hours and "today".
+    timezone: str = "UTC"
+    user_display_name: str = "User"
+    assistant_display_name: str = "Assistant"
+    # Background memory work uses the OpenAI-compatible endpoint above with
+    # its own (usually cheaper) model. Empty disables model-backed memory.
+    memory_model: str = ""
+    memory_reflection: bool = False
+    memory_summaries: bool = False
+    # Desire heartbeat. Behaviour is additionally gated by the
+    # PERSONA_HUB_DESIRE_* flags, which all default to off.
+    desire_enabled: bool = False
+    desire_state_path: Path = Path("data/desire_state.json")
+    desire_quiet_hours: str = "02-08"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -49,7 +63,32 @@ class Settings:
             openai_base_url=os.getenv("OPENAI_COMPATIBLE_BASE_URL", ""),
             openai_api_key=os.getenv("OPENAI_COMPATIBLE_API_KEY", ""),
             openai_model=os.getenv("OPENAI_COMPATIBLE_MODEL", ""),
+            timezone=os.getenv("PERSONA_HUB_TIMEZONE", "UTC"),
+            user_display_name=os.getenv("PERSONA_HUB_USER_NAME", "User"),
+            assistant_display_name=os.getenv("PERSONA_HUB_ASSISTANT_NAME", "Assistant"),
+            memory_model=os.getenv("PERSONA_HUB_MEMORY_MODEL", ""),
+            memory_reflection=_env_flag("PERSONA_HUB_MEMORY_REFLECTION"),
+            memory_summaries=_env_flag("PERSONA_HUB_MEMORY_SUMMARIES"),
+            desire_enabled=_env_flag("PERSONA_HUB_DESIRE"),
+            desire_state_path=Path(
+                os.getenv("PERSONA_HUB_DESIRE_STATE", "data/desire_state.json")
+            ),
+            desire_quiet_hours=os.getenv("PERSONA_HUB_DESIRE_QUIET_HOURS", "02-08"),
         )
+
+    def quiet_hours(self) -> tuple[int, int]:
+        """Parse "02-08" into (2, 8). A window may wrap midnight ("23-07")."""
+
+        try:
+            start_text, end_text = self.desire_quiet_hours.split("-", 1)
+            start, end = int(start_text), int(end_text)
+        except ValueError as exc:
+            raise ValueError(
+                f"PERSONA_HUB_DESIRE_QUIET_HOURS must look like 02-08, got {self.desire_quiet_hours!r}"
+            ) from exc
+        if not (0 <= start <= 23 and 0 <= end <= 24):
+            raise ValueError("Quiet hours must be within 0-24")
+        return start, end
 
     def validate_for_production(self) -> None:
         if self.environment != "production":

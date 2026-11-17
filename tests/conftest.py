@@ -27,6 +27,7 @@ def app_bundle(tmp_path: Path, echo_provider: EchoProvider):
         persona_file=persona_file,
         worker_token="test-worker-token",
         default_provider="echo",
+        desire_state_path=tmp_path / "desire_state.json",
     )
     database = Database(settings.database_path)
     providers = ProviderRegistry()

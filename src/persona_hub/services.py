@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from typing import Any, Awaitable, Callable
 
 from .context import ContextBuilder
 from .db import Database
 from .providers import GenerationRequest, ProviderRegistry
+
+
+logger = logging.getLogger("persona_hub.chat")
+
+AfterTurn = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[Any]]
 
 
 class RequestInProgressError(RuntimeError):
@@ -23,11 +31,19 @@ class ChatService:
         context_builder: ContextBuilder,
         providers: ProviderRegistry,
         default_provider: str,
+        on_user_message: Callable[[], None] | None = None,
+        after_turn: AfterTurn | None = None,
     ):
         self.database = database
         self.context_builder = context_builder
         self.providers = providers
         self.default_provider = default_provider
+        # Called once per new user message (desire's owner fast channel).
+        self.on_user_message = on_user_message
+        # Runs in the background after the reply is stored (reflection). It
+        # must never delay or fail the turn that triggered it.
+        self.after_turn = after_turn
+        self._background: set[asyncio.Task[None]] = set()
 
     async def chat(
         self,
@@ -56,6 +72,12 @@ class ChatService:
                 "This request already exists and is still in progress."
             )
 
+        if self.on_user_message is not None:
+            try:
+                self.on_user_message()
+            except Exception:
+                logger.exception("on_user_message hook failed")
+
         try:
             package = self.context_builder.build(conversation_id, content)
             provider = self.providers.get(selected_provider)
@@ -76,13 +98,39 @@ class ChatService:
                 model_id=result.model_id,
                 recalled_memory_ids=[item.id for item in package.recalled_memories],
             )
-            return self._response(request, replayed=False)
+            response = self._response(request, replayed=False)
+            self._schedule_after_turn(
+                conversation_id, response["user_message"], response["assistant_message"]
+            )
+            return response
         except Exception as exc:
             self.database.fail_chat_request(
                 request_id,
                 {"type": type(exc).__name__, "message": str(exc)},
             )
             raise
+
+    def _schedule_after_turn(
+        self, conversation_id: str, user_message: dict, assistant_message: dict
+    ) -> None:
+        if self.after_turn is None:
+            return
+
+        async def run() -> None:
+            try:
+                await self.after_turn(conversation_id, user_message, assistant_message)
+            except Exception:
+                logger.exception("after_turn hook failed")
+
+        task = asyncio.create_task(run())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def drain(self) -> None:
+        """Wait for background work to finish (shutdown and tests)."""
+
+        while self._background:
+            await asyncio.gather(*list(self._background), return_exceptions=True)
 
     def _response(self, request: dict, *, replayed: bool) -> dict:
         if not request["assistant_message_id"]:

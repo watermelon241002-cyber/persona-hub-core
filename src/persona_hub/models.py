@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -74,6 +75,14 @@ class MemoryView(BaseModel):
     # Per-signal breakdown of `score`, so a surprising recall can be explained
     # instead of guessed at.
     signals: dict[str, float] = Field(default_factory=dict)
+
+
+class SummaryRunRequest(BaseModel):
+    summary_type: Literal["daily", "weekly", "monthly"] = "daily"
+    # ISO timestamps; defaults cover the last completed lookback window.
+    start: datetime | None = None
+    end: datetime | None = None
+    force: bool = False
 
 
 class RoomParticipantCreate(BaseModel):

@@ -27,16 +27,19 @@
 - [ ] pluggable embedding interface
 - [ ] Qwen3 embedding adapter example
 - [ ] embedding version migrations
-- [ ] memory candidate extraction
-- [ ] deduplication and review UI
+- [x] memory candidate extraction (score-anchored turn reflection)
+- [x] layered daily / weekly / monthly summaries with a scheduler
+- [x] text-overlap deduplication and a candidate review API
+- [ ] candidate review UI
 - [ ] rolling conversation summaries
 
 ## 0.4 integrations
 
 - [ ] MCP service registry and capability policies
 - [ ] Ombre Brain adapter example
-- [ ] desire/heartbeat scheduler
-- [ ] controlled autonomous activity
+- [x] desire kernel and heartbeat scheduler (gated, quiet hours, output guards)
+- [x] autonomous speech recorded to an activity log
+- [ ] tool-using outward actions through a worker (needs 0.2)
 - [ ] STT/TTS interfaces
 - [ ] device/StackChan protocol
 
